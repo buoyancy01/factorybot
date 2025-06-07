@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: factorybot-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_AUTH
+        sync: false
+      - key: SHIP24_API_KEY
+        sync: false

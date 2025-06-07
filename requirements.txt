@@ -1,0 +1,6 @@
+flask
+requests
+openai
+beautifulsoup4
+faiss-cpu
+numpy
