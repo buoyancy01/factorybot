@@ -1,11 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string
-import requests, os, openai
+from flask import Flask, request, render_template_string
+import requests, os, openai, json
 from collections import defaultdict
-from bs4 import BeautifulSoup
+import datetime
+import numpy as np
 import faiss
-import pickle
-import time
-import hashlib
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -15,20 +14,20 @@ TWILIO_AUTH = os.getenv("TWILIO_AUTH")
 TWILIO_NUMBER = 'whatsapp:+14155238886'
 SHIP24_API_KEY = os.getenv("SHIP24_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 openai.api_key = OPENAI_API_KEY
 
-# ✅ Ensure dirs exist
-os.makedirs("logs", exist_ok=True)
-os.makedirs("vectordb", exist_ok=True)
-
 # ✅ MEMORY STORAGE
+MEMORY_DIR = "logs"
+VECTOR_DIR = "vectordb"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+os.makedirs(VECTOR_DIR, exist_ok=True)
 user_memory = defaultdict(list)
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp():
     msg = request.form.get('Body', '').strip()
     sender = request.form.get('From')
-
     response_text = None
 
     if msg.lower().startswith("track "):
@@ -37,7 +36,7 @@ def whatsapp():
 
     elif msg.lower().startswith("product "):
         keyword = msg.split("product ", 1)[1].strip()
-        response_text = vector_search_product(keyword)
+        response_text = search_product(keyword)
 
     elif msg.lower() == "form":
         response_text = form_reply()
@@ -48,6 +47,42 @@ def whatsapp():
     send_whatsapp_message(sender, response_text)
     return "OK", 200
 
+@app.route("/admin/logs")
+def admin_logs():
+    logs_html = "<h1>📊 WhatsApp User Logs</h1><ul>"
+    for filename in sorted(os.listdir(MEMORY_DIR)):
+        with open(os.path.join(MEMORY_DIR, filename)) as f:
+            convo = json.load(f)
+        logs_html += f"<li><strong>{filename}</strong><ul>"
+        for entry in convo:
+            logs_html += f"<li><b>{entry['role']}:</b> {entry['content']}</li>"
+        logs_html += "</ul></li>"
+    logs_html += "</ul>"
+    return render_template_string(logs_html)
+
+@app.route("/refresh_products")
+def refresh_products():
+    try:
+        url = "https://shop.factory43.com/"
+        soup = BeautifulSoup(requests.get(url).text, "html.parser")
+        text = soup.get_text()
+
+        chunks = [text[i:i+500] for i in range(0, len(text), 500)]
+        embeddings = []
+        for chunk in chunks:
+            res = openai.embeddings.create(input=chunk, model="text-embedding-ada-002")
+            embeddings.append(np.array(res.data[0].embedding, dtype=np.float32))
+
+        index = faiss.IndexFlatL2(len(embeddings[0]))
+        index.add(np.array(embeddings))
+
+        faiss.write_index(index, os.path.join(VECTOR_DIR, "product.idx"))
+        with open(os.path.join(VECTOR_DIR, "chunks.json"), "w") as f:
+            json.dump(chunks, f)
+
+        return "✅ Vector DB refreshed."
+    except Exception as e:
+        return f"❌ Refresh failed: {e}"
 
 def send_whatsapp_message(to, body):
     url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json'
@@ -58,7 +93,6 @@ def send_whatsapp_message(to, body):
         'Body': body
     }
     requests.post(url, data=data, auth=auth)
-
 
 def track_package(tracking_number):
     url = f"https://api.ship24.com/public/v1/trackers/{tracking_number}"
@@ -71,96 +105,51 @@ def track_package(tracking_number):
     except:
         return "❌ Couldn't find tracking info. Please double-check your number."
 
+def search_product(keyword):
+    try:
+        index_path = os.path.join(VECTOR_DIR, "product.idx")
+        chunks_path = os.path.join(VECTOR_DIR, "chunks.json")
+        if not os.path.exists(index_path) or not os.path.exists(chunks_path):
+            return "⚠️ Vector DB not built yet. Please refresh."
+
+        index = faiss.read_index(index_path)
+        with open(chunks_path) as f:
+            chunks = json.load(f)
+
+        res = openai.embeddings.create(input=keyword, model="text-embedding-ada-002")
+        query = np.array(res.data[0].embedding, dtype=np.float32)
+
+        D, I = index.search(np.array([query]), k=1)
+        match = chunks[I[0][0]]
+
+        return f"🔍 Top result for '{keyword}':\n" + match.strip()[:300]
+    except Exception as e:
+        return f"❌ Search failed: {e}"
 
 def form_reply():
     return "📝 Latest form response: Name: John Doe, Email: john@example.com"
 
-
 def gpt_reply(user_id, user_msg):
     save_convo(user_id, 'user', user_msg)
+
     history = user_memory[user_id][-6:]
-    prompt = [
-        {"role": "system", "content": "You are a friendly customer service assistant for an online store."}
-    ] + history
+    prompt = [{"role": "system", "content": "You are a helpful assistant for an e-commerce store."}] + history
 
     try:
-        res = openai.ChatCompletion.create(
+        res = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=prompt,
             temperature=0.6,
             max_tokens=150
         )
-        reply = res['choices'][0]['message']['content'].strip()
+        reply = res.choices[0].message.content.strip()
         save_convo(user_id, 'assistant', reply)
         return reply
     except Exception as e:
-        return "⚠️ GPT failed. Please try again."
-
+        return f"⚠️ GPT failed: {e}"
 
 def save_convo(user_id, role, content):
     user_memory[user_id].append({"role": role, "content": content})
-    with open(f"logs/{hashlib.sha256(user_id.encode()).hexdigest()}.txt", "a", encoding="utf-8") as f:
-        f.write(f"{role}: {content}\n")
-
-
-@app.route('/refresh_products')
-def refresh_products():
-    try:
-        html = requests.get("https://shop.factory43.com").text
-        soup = BeautifulSoup(html, 'html.parser')
-        products = [tag.get_text(strip=True) for tag in soup.find_all(['h1', 'h2', 'h3', 'p', 'a'])]
-        chunks = [p for p in products if len(p) > 20]
-
-        vectors, texts = [], []
-        for chunk in chunks:
-            emb = openai.Embedding.create(input=chunk, model="text-embedding-ada-002")
-            vectors.append(emb['data'][0]['embedding'])
-            texts.append(chunk)
-
-        index = faiss.IndexFlatL2(len(vectors[0]))
-        index.add(np.array(vectors).astype('float32'))
-
-        with open("vectordb/index.pkl", "wb") as f:
-            pickle.dump((index, texts), f)
-
-        return "✅ Vector DB refreshed with product data."
-    except Exception as e:
-        return f"❌ Refresh failed: {e}"
-
-
-def vector_search_product(query):
-    try:
-        with open("vectordb/index.pkl", "rb") as f:
-            index, texts = pickle.load(f)
-        emb = openai.Embedding.create(input=query, model="text-embedding-ada-002")
-        D, I = index.search(np.array([emb['data'][0]['embedding']]).astype('float32'), 1)
-        return f"🔍 Closest match: {texts[I[0][0]]}"
-    except:
-        return "⚠️ Product search failed. Try again later."
-
-
-@app.route('/admin/logs')
-def admin_logs():
-    entries = []
-    for fname in os.listdir("logs"):
-        with open(f"logs/{fname}", encoding='utf-8') as f:
-            entries.append((fname, f.read()))
-
-    html = """
-    <html><head><title>Admin Logs</title>
-    <style>
-    body { font-family: 'Segoe UI', sans-serif; background: #f5f7fa; padding: 20px; }
-    h2 { color: #333; }
-    .log { background: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); padding: 15px; margin-bottom: 20px; border-radius: 8px; }
-    pre { white-space: pre-wrap; word-wrap: break-word; }
-    </style></head><body>
-    <h2>📊 WhatsApp User Logs</h2>
-    {% for fname, content in entries %}
-        <div class="log">
-            <strong>{{ fname }}</strong>
-            <pre>{{ content }}</pre>
-        </div>
-    {% endfor %}
-    </body></html>
-    """
-    return render_template_string(html, entries=entries)
+    filepath = os.path.join(MEMORY_DIR, user_id.replace(":", "") + ".json")
+    with open(filepath, "w") as f:
+        json.dump(user_memory[user_id], f)
