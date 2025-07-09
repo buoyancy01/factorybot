@@ -1,6 +1,7 @@
 from flask import Flask, request
 from openai import OpenAI
 from bs4 import BeautifulSoup
+from langdetect import detect
 import os, json, requests
 from collections import defaultdict
 from datetime import datetime
@@ -63,19 +64,49 @@ def send_whatsapp_message(to, body):
     requests.post(url, data=data, auth=auth)
 
 
-# ✅ GPT RESPONSE
+# ✅ GPT RESPONSE WITH MULTILINGUAL SUPPORT
+from deep_translator import GoogleTranslator
+
 def gpt_reply(user_id, user_msg):
     save_convo(user_id, "user", user_msg)
     history = load_convo(user_id)[-6:]
+
+    detected_lang = detect(user_msg)
+    translated_input = GoogleTranslator(source='auto', target='en').translate(user_msg)
 
     prompt = [
         {
             "role": "system",
             "content": (
-                "You are a friendly, helpful customer support assistant for a stylish brand called Factory43. "
-                "You're chatting on WhatsApp to assist users with their orders, products, and tracking. "
-                "You know the store URL is https://shop.factory43.com/. Never say you're an AI. "
-                "Act like you're part of the Factory43 team."
+                "You are not a general-purpose AI. You are a dedicated, expert-level virtual sales agent for Embalabin (www.embalabin.com) — "
+                "a specialized Brazilian e-commerce store that offers high-quality packaging and waste management products like trash bags, "
+                "plastic containers, dispensers, mop systems, plastic pallets, and more. You exist solely to answer questions about the Embalabin store, "
+                "its products, services, policies, and purchasing processes. You do not answer questions unrelated to the store.\n\n"
+
+                "🎯 Your mission:\n"
+                "1. Turn casual or cold visitors into hot buyers.\n"
+                "2. Guide users in browsing and choosing the right products.\n"
+                "3. Build trust using Embalabin’s policies and quality guarantees.\n"
+                "4. Create urgency and desire using scarcity, discounts, and value stacking.\n"
+                "5. Handle objections with empathy and expertise.\n"
+                "6. Upsell complementary products like trash bags with containers.\n"
+                "7. Use persuasive, friendly language with professional knowledge.\n\n"
+
+                "🏪 Store Details:\n"
+                "- Core products: Trash bags, 60L–1000L containers, mop sets, dispensers, plastic pallets\n"
+                "- Clients: Hospitals, cleaning companies, malls, condos, industries\n"
+                "- Materials: UV-protected, durable PEAD/PEMD plastic, ABNT + UNE EN 840 certified\n"
+                "- Delivery: 10–25 business days from factory, Brazil-wide shipping\n"
+                "- Payment: Secure checkout, PIX discounts, 12× installments\n"
+                "- Returns: 7-day return policy, 90-day warranty on defects\n\n"
+
+                "✅ Example Tactics:\n"
+                "- 'Many businesses like yours use our 1000L pedal container.'\n"
+                "- 'You’re protected by a 7-day return policy and secure checkout.'\n"
+                "- 'Only a few left at this discount — can I reserve one for you?'\n"
+                "- 'We offer free delivery and PIX payment discounts — shall I help you check out?'\n\n"
+
+                "🚫 DO NOT answer unrelated topics. Always guide toward exploring or buying Embalabin products."
             )
         }
     ] + history
@@ -83,13 +114,18 @@ def gpt_reply(user_id, user_msg):
     try:
         res = client.chat.completions.create(
             model="gpt-4",
-            messages=prompt,
+            messages=prompt + [{"role": "user", "content": translated_input}],
             temperature=0.6,
             max_tokens=200
         )
         reply = res.choices[0].message.content.strip()
-        save_convo(user_id, "assistant", reply)
-        return reply
+        translated_output = (
+            GoogleTranslator(source='en', target=detected_lang).translate(reply)
+            if detected_lang != 'en'
+            else reply
+        )
+        save_convo(user_id, "assistant", translated_output)
+        return translated_output
     except Exception as e:
         return f"⚠️ GPT error: {str(e)}"
 
@@ -127,7 +163,6 @@ def track_package(tracking_number):
 
 # ✅ FORM DATA
 def get_latest_form_data():
-    # Placeholder
     return "📝 Latest form submission: Name: John Doe, Email: john@example.com"
 
 
