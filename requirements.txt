@@ -6,3 +6,5 @@ faiss-cpu
 numpy
 gunicorn
 scikit-learn
+langdetect
+deep-translator
